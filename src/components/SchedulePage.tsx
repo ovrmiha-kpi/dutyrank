@@ -15,7 +15,7 @@ import { buildAssignmentIndex, key2 } from '../lib/indexes'
 import {
   addDaysISO,
   addMonthsISO,
-  assignmentDaysLeftFrom,
+  assignmentEndDate,
   assignmentSpanDays,
   dateRange,
   dayOfMonth,
@@ -24,7 +24,6 @@ import {
   formatHuman,
   formatMonthTitle,
   formatShort,
-  isAssignmentDrawDay,
   isWeekend,
   startOfMonthISO,
   startOfWeekISO,
@@ -127,6 +126,8 @@ export function SchedulePage({ readOnly = false }: { readOnly?: boolean }) {
   const [manual, setManual] = useState<{ date?: ISODate; dutyId?: string } | null>(null)
   const [selectedCells, setSelectedCells] = useState<Map<string, JournalCellRef>>(() => new Map())
   const [bulkOpen, setBulkOpen] = useState(false)
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
+  const ctxMenuRef = useRef<HTMLDivElement>(null)
   const selectAnchor = useRef<JournalCellRef | null>(null)
   const [slideDir, setSlideDir] = useState<-1 | 0 | 1>(0)
   const [animKey, setAnimKey] = useState(0)
@@ -333,6 +334,10 @@ export function SchedulePage({ readOnly = false }: { readOnly?: boolean }) {
   const dayColWidth = (d: ISODate) => {
     const n = Math.max(1, dayDensity.get(d) ?? 0)
     const narrow = typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+    // У «люди» ширина від щільності лише коли в дні кілька нарядів (вертикаль не потребує ширших колонок).
+    if (effectiveRowsMode === 'people') {
+      return `${isDutyJournal ? (narrow ? 2.15 : 2.6) : narrow ? 2.6 : 3.2}rem`
+    }
     const chip = isDutyJournal ? (narrow ? 2.0 : 2.4) : narrow ? 2.6 : 3.2
     return `${Math.max(narrow ? 2.15 : 2.6, n * chip)}rem`
   }
@@ -340,6 +345,7 @@ export function SchedulePage({ readOnly = false }: { readOnly?: boolean }) {
   const clearSelection = () => {
     setSelectedCells(new Map())
     selectAnchor.current = null
+    setCtxMenu(null)
   }
 
   const collectSelectedAssignmentIds = useCallback(() => {
@@ -462,10 +468,55 @@ export function SchedulePage({ readOnly = false }: { readOnly?: boolean }) {
       dragSelectRef.current = null
       // Після drag-виділення не відкриваємо редактор
       if (drag?.moved) return
+      // Простий клік: редактор без «виділеної» комірки / плашки
+      setSelectedCells(new Map())
+      selectAnchor.current = null
+      setCtxMenu(null)
       setCell({ personId, date })
     },
     [readOnly],
   )
+
+  const onPersonCellContextMenu = useCallback(
+    (personId: string, date: ISODate, e: MouseEvent) => {
+      if (readOnly || effectiveRowsMode !== 'people') return
+      e.preventDefault()
+      e.stopPropagation()
+      dragSelectRef.current = null
+      const ref: JournalCellRef = { personId, date }
+      const key = cellKey(ref)
+      setSelectedCells((prev) => {
+        if (prev.has(key) && prev.size > 0) return prev
+        selectAnchor.current = ref
+        return new Map([[key, ref]])
+      })
+      const pad = 8
+      const x = Math.min(e.clientX, window.innerWidth - 200)
+      const y = Math.min(e.clientY, window.innerHeight - 180)
+      setCtxMenu({ x: Math.max(pad, x), y: Math.max(pad, y) })
+    },
+    [readOnly, effectiveRowsMode],
+  )
+
+  useEffect(() => {
+    if (!ctxMenu) return
+    const onDoc = (ev: globalThis.MouseEvent) => {
+      if (ctxMenuRef.current?.contains(ev.target as Node)) return
+      setCtxMenu(null)
+    }
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setCtxMenu(null)
+    }
+    const onScroll = () => setCtxMenu(null)
+    document.addEventListener('mousedown', onDoc)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onScroll, true)
+    }
+  }, [ctxMenu])
 
   useEffect(() => {
     const endDrag = () => {
@@ -744,6 +795,11 @@ export function SchedulePage({ readOnly = false }: { readOnly?: boolean }) {
                         onCellClick={
                           readOnly ? undefined : (date, e) => onPersonCellClick(p.id, date, e)
                         }
+                        onCellContextMenu={
+                          readOnly
+                            ? undefined
+                            : (date, e) => onPersonCellContextMenu(p.id, date, e)
+                        }
                         selectedKeys={selectedKeys}
                         myropilMask={peopleMyropilMeta?.[pi]?.mask}
                         myropilLeader={peopleMyropilMeta?.[pi]?.isLeader ?? false}
@@ -768,6 +824,11 @@ export function SchedulePage({ readOnly = false }: { readOnly?: boolean }) {
                         }
                         onCellClick={
                           readOnly ? undefined : (date, e) => onPersonCellClick(p.id, date, e)
+                        }
+                        onCellContextMenu={
+                          readOnly
+                            ? undefined
+                            : (date, e) => onPersonCellContextMenu(p.id, date, e)
                         }
                         selectedKeys={selectedKeys}
                       />
@@ -884,13 +945,11 @@ export function SchedulePage({ readOnly = false }: { readOnly?: boolean }) {
           journalId={journal === 'myropil' ? 'myropil' : 'duties'}
         />
       )}
+      {/* Лише мобілка: на ПК — ПКМ по виділенню */}
       {!readOnly && selectedCells.size > 0 && effectiveRowsMode === 'people' && (
-        <div className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] left-1/2 z-[60] flex max-w-[calc(100vw-1rem)] -translate-x-1/2 items-center gap-1.5 rounded-lg border border-border bg-surface px-2 py-2 shadow-xl shadow-black/40 sm:bottom-4 sm:gap-2 sm:px-3 md:bottom-4">
-          <span className="shrink-0 text-xs text-fg sm:text-sm">
+        <div className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] left-1/2 z-[60] flex max-w-[calc(100vw-1rem)] -translate-x-1/2 items-center gap-1.5 rounded-lg border border-border bg-surface px-2 py-2 shadow-xl shadow-black/40 sm:hidden">
+          <span className="shrink-0 text-xs text-fg">
             Виділено: <b>{selectedCells.size}</b>
-          </span>
-          <span className="hidden text-xs text-fg-faint sm:inline">
-            тягни мишею · Ctrl+клік · Shift · Esc · Backspace
           </span>
           {isDutyJournal && (
             <button
@@ -909,10 +968,71 @@ export function SchedulePage({ readOnly = false }: { readOnly?: boolean }) {
             title="Видалити призначення (Backspace)"
           >
             <Trash2 size={14} />
-            <span className="hidden sm:inline">Видалити</span>
           </button>
           <button type="button" className="btn-ghost btn-sm" onClick={clearSelection} title="Зняти виділення">
             <X size={14} />
+          </button>
+        </div>
+      )}
+      {!readOnly && ctxMenu && selectedCells.size > 0 && effectiveRowsMode === 'people' && (
+        <div
+          ref={ctxMenuRef}
+          role="menu"
+          className="fixed z-[70] hidden min-w-[11rem] flex-col overflow-hidden rounded-lg border border-border bg-surface py-1 shadow-xl shadow-black/40 sm:flex"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+        >
+          <div className="border-b border-border px-3 py-1.5 text-[11px] text-fg-faint">
+            Виділено: {selectedCells.size}
+          </div>
+          {selectedCells.size === 1 && (
+            <button
+              type="button"
+              role="menuitem"
+              className="px-3 py-2 text-left text-sm text-fg hover:bg-surface-2"
+              onClick={() => {
+                const only = selectedList[0]
+                if (!only) return
+                setCtxMenu(null)
+                setSelectedCells(new Map())
+                selectAnchor.current = null
+                setCell({ personId: only.personId, date: only.date })
+              }}
+            >
+              Відкрити…
+            </button>
+          )}
+          {isDutyJournal && (
+            <button
+              type="button"
+              role="menuitem"
+              className="px-3 py-2 text-left text-sm font-medium text-brand-600 hover:bg-brand-600/10"
+              onClick={() => {
+                setCtxMenu(null)
+                setBulkOpen(true)
+              }}
+            >
+              Призначити…
+            </button>
+          )}
+          <button
+            type="button"
+            role="menuitem"
+            className="flex items-center gap-2 px-3 py-2 text-left text-sm text-tint-red hover:bg-tint-red/10"
+            onClick={() => {
+              setCtxMenu(null)
+              deleteSelectedAssignments()
+            }}
+          >
+            <Trash2 size={14} />
+            Видалити
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="px-3 py-2 text-left text-sm text-fg-muted hover:bg-surface-2"
+            onClick={clearSelection}
+          >
+            Зняти виділення
           </button>
         </div>
       )}
@@ -993,6 +1113,7 @@ const PersonRow = memo(function PersonRow({
   onCellMouseDown,
   onCellMouseEnter,
   onCellClick,
+  onCellContextMenu,
   selectedKeys,
   myropilMask,
   myropilLeader,
@@ -1009,6 +1130,7 @@ const PersonRow = memo(function PersonRow({
   onCellMouseDown?: (date: ISODate, e: MouseEvent) => void
   onCellMouseEnter?: (date: ISODate) => void
   onCellClick?: (date: ISODate, e: MouseEvent) => void
+  onCellContextMenu?: (date: ISODate, e: MouseEvent) => void
   selectedKeys?: Set<string>
   myropilMask?: boolean[]
   myropilLeader?: boolean
@@ -1043,7 +1165,6 @@ const PersonRow = memo(function PersonRow({
     }
 
     const inScope = activeMask ? activeMask[di] !== false : true
-    const list = index.get(key2(person.id, d))
     const isToday = d === today
     if (!inScope) {
       dayCells.push(
@@ -1060,39 +1181,24 @@ const PersonRow = memo(function PersonRow({
       continue
     }
 
-    // Багатоденний блок: зі старту або з першого видимого дня (перехід через місяць).
-    const isSkipped = (i: number) => Boolean(mask?.[i]) || (activeMask ? activeMask[i] === false : false)
-    const starting = (list ?? []).filter((a) => isAssignmentDrawDay(a, d, dates, di, isSkipped))
-    if ((list?.length ?? 0) > 0 && starting.length === 0) {
-      di += 1
-      continue
-    }
-    const spanCover = starting.reduce((m, a) => Math.max(m, assignmentDaysLeftFrom(a, d)), 1)
-    let colSpan = Math.min(spanCover, dates.length - di)
-    for (let i = 1; i < colSpan; i++) {
-      if (mask?.[di + i] || (activeMask && activeMask[di + i] === false)) {
-        colSpan = i
-        break
-      }
-    }
-
-    // Ширину колонок задає thead; colspan без суми minWidth — інакше браузер роздуває дні.
+    // Завжди рівно одна <td> на день — інакше colspan ламає сітку колонок.
+    const dayList = [...(index.get(key2(person.id, d)) ?? [])].sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1
+      return a.id.localeCompare(b.id)
+    })
     const selected = selectedKeys?.has(cellKey({ personId: person.id, date: d })) ?? false
+
     dayCells.push(
       <td
         key={d}
-        colSpan={colSpan > 1 ? colSpan : undefined}
         onMouseDown={onCellMouseDown ? (e) => onCellMouseDown(d, e) : undefined}
         onMouseEnter={onCellMouseEnter ? () => onCellMouseEnter(d) : undefined}
         onClick={onCellClick ? (e) => onCellClick(d, e) : undefined}
-        style={
-          colSpan > 1
-            ? undefined
-            : { minWidth: dayColWidth(d), width: dayColWidth(d) }
-        }
+        onContextMenu={onCellContextMenu ? (e) => onCellContextMenu(d, e) : undefined}
+        style={{ minWidth: dayColWidth(d), width: dayColWidth(d) }}
         className={clsx(
-          'relative select-none border-b border-l border-border/40 p-0 transition-colors',
-          (onCellMouseDown || onCellClick) && 'cursor-cell',
+          'relative select-none border-b border-l border-border/40 p-0 align-top transition-colors',
+          (onCellMouseDown || onCellClick || onCellContextMenu) && 'cursor-cell',
           isToday && !selected && 'bg-brand-600/10',
           !isToday && !selected && isWeekend(d) && 'bg-surface-2/50',
           activeMask && !selected && 'bg-tint-sky/5',
@@ -1106,27 +1212,21 @@ const PersonRow = memo(function PersonRow({
             className="pointer-events-none absolute inset-0 z-[2] box-border border-2 border-brand-400"
           />
         )}
-        {starting.length > 0 ? (
-          <div className="flex h-7 w-full flex-row">
-            {starting.map((a) => {
+        {dayList.length > 0 ? (
+          <div className="flex w-full flex-col">
+            {dayList.map((a) => {
               const duty = dutyById.get(a.dutyTypeId)
               const v = findVariant(duty, a.variantId)
               const span = assignmentSpanDays(a)
-              const cont = a.date < d
+              const label = (dutyShortLabel(duty) || '') + (v ? `/${v.short || v.name}` : '')
               return (
                 <span
                   key={a.id}
-                  className="group/chip flex h-7 min-w-0 flex-1 items-center justify-center truncate px-0.5 text-center text-[11px] leading-none font-semibold text-white"
+                  className="flex h-7 min-h-7 w-full shrink-0 items-center justify-center truncate px-0.5 text-center text-[11px] leading-none font-semibold text-white"
                   style={{ backgroundColor: duty?.color ?? '#475569', borderRadius: 0 }}
-                  title={
-                    (span > 1 ? `${span} дн.${cont ? ' (продовження)' : ''} · ` : '') +
-                    dutyHoverTitle(duty, a.points, a.variantId, a.note)
-                  }
+                  title={(span > 1 ? `${span} дн. · ` : '') + dutyHoverTitle(duty, a.points, a.variantId, a.note)}
                 >
-                  <span className="truncate">
-                    {dutyShortLabel(duty)}
-                    {v ? `/${v.short || v.name}` : ''}
-                  </span>
+                  <span className="truncate">{label}</span>
                 </span>
               )
             })}
@@ -1138,7 +1238,7 @@ const PersonRow = memo(function PersonRow({
         )}
       </td>,
     )
-    di += colSpan
+    di += 1
   }
 
   return (
@@ -1237,6 +1337,7 @@ const NotePersonRow = memo(function NotePersonRow({
   onCellMouseDown,
   onCellMouseEnter,
   onCellClick,
+  onCellContextMenu,
   selectedKeys,
 }: {
   person: Person
@@ -1249,6 +1350,7 @@ const NotePersonRow = memo(function NotePersonRow({
   onCellMouseDown?: (date: ISODate, e: MouseEvent) => void
   onCellMouseEnter?: (date: ISODate) => void
   onCellClick?: (date: ISODate, e: MouseEvent) => void
+  onCellContextMenu?: (date: ISODate, e: MouseEvent) => void
   selectedKeys?: Set<string>
 }) {
   const inactive = person.status !== 'active'
@@ -1279,10 +1381,11 @@ const NotePersonRow = memo(function NotePersonRow({
             onMouseDown={onCellMouseDown ? (e) => onCellMouseDown(d, e) : undefined}
             onMouseEnter={onCellMouseEnter ? () => onCellMouseEnter(d) : undefined}
             onClick={onCellClick ? (e) => onCellClick(d, e) : undefined}
+            onContextMenu={onCellContextMenu ? (e) => onCellContextMenu(d, e) : undefined}
             style={{ minWidth: dayColWidth(d), width: dayColWidth(d) }}
             className={clsx(
               'relative select-none border-b border-l border-border/40 p-0 transition-colors',
-              (onCellMouseDown || onCellClick) && 'cursor-cell',
+              (onCellMouseDown || onCellClick || onCellContextMenu) && 'cursor-cell',
               isToday && !selected && 'bg-brand-600/10',
               !isToday && !selected && isWeekend(d) && 'bg-surface-2/50',
               d > today && !selected && 'opacity-80',
@@ -1385,51 +1488,44 @@ const DutyRow = memo(function DutyRow({
       </td>
       {(() => {
         const dayCells: ReactNode[] = []
-        for (let di = 0; di < dates.length; ) {
-          const d = dates[di]
-          const list = index.get(key2(duty.id, d))
+        for (const d of dates) {
+          const list = [...(index.get(key2(duty.id, d)) ?? [])].sort((a, b) => {
+            if (a.date !== b.date) return a.date < b.date ? -1 : 1
+            return a.id.localeCompare(b.id)
+          })
           const isToday = d === today
-          const starting = (list ?? []).filter((a) => isAssignmentDrawDay(a, d, dates, di))
-          if ((list?.length ?? 0) > 0 && starting.length === 0) {
-            di += 1
-            continue
-          }
-          const spanCover = starting.reduce((m, a) => Math.max(m, assignmentDaysLeftFrom(a, d)), 1)
-          const colSpan = Math.min(spanCover, dates.length - di)
+          const multi = list.length > 1
           dayCells.push(
             <td
               key={d}
-              colSpan={colSpan > 1 ? colSpan : undefined}
-              style={
-                colSpan > 1
-                  ? undefined
-                  : { minWidth: dayColWidth(d), width: dayColWidth(d) }
-              }
+              style={{ minWidth: dayColWidth(d), width: dayColWidth(d) }}
               className={clsx(
-                'border-b border-l border-border/40 p-0',
+                'border-b border-l border-border/40 p-0 align-top',
                 isToday && 'bg-brand-600/10',
                 !isToday && isWeekend(d) && 'bg-surface-2/50',
               )}
             >
-              <div className="flex h-7 w-full flex-row">
-                {starting.map((a) => {
+              <div className={clsx('flex w-full', multi ? 'flex-col' : 'h-7 flex-row')}>
+                {list.map((a) => {
                   const p = personById.get(a.personId)
                   const v = findVariant(duty, a.variantId)
                   const span = assignmentSpanDays(a)
-                  const cont = a.date < d
+                  const startsToday = a.date === d
+                  const endsToday = assignmentEndDate(a) === d
+                  const showLabel = startsToday || endsToday || multi || span === 1
+                  const name = surname(p?.name)
                   return (
                     <span
                       key={a.id}
-                      className="group/chip flex h-7 min-w-0 flex-1 items-center gap-0.5 border-l-2 bg-surface-3 px-1 text-[11px] leading-none"
+                      className={clsx(
+                        'group/chip flex h-7 min-h-7 w-full shrink-0 items-center gap-0.5 border-l-2 bg-surface-3 px-1 text-[11px] leading-none',
+                      )}
                       style={{ borderLeftColor: duty.color, borderRadius: 0 }}
-                      title={
-                        (span > 1 ? `${span} дн.${cont ? ' (продовження)' : ''} · ` : '') +
-                        dutyHoverTitle(duty, a.points, a.variantId)
-                      }
+                      title={(span > 1 ? `${span} дн. · ` : '') + dutyHoverTitle(duty, a.points, a.variantId)}
                     >
-                      <span className="truncate">
-                        {surname(p?.name)}
-                        {v && (
+                      <span className={clsx('truncate', !showLabel && 'invisible')}>
+                        {showLabel ? name : name}
+                        {showLabel && v && (
                           <span className="hidden text-fg-faint group-hover/chip:inline">
                             {' '}
                             · {v.short || v.name}
@@ -1450,17 +1546,20 @@ const DutyRow = memo(function DutyRow({
                 })}
                 {!readOnly && onCell && (
                   <button
-                    className="flex h-7 w-5 shrink-0 items-center justify-center text-fg-faint opacity-0 transition-opacity hover:bg-surface-3 group-hover/row:opacity-60"
+                    className={clsx(
+                      'flex shrink-0 items-center justify-center text-fg-faint opacity-0 transition-opacity hover:bg-surface-3 group-hover/row:opacity-60',
+                      multi ? 'h-6 w-full' : 'h-7 w-5',
+                    )}
                     onClick={() => onCell(d)}
                     title="Додати людину"
                   >
                     <Plus size={12} />
                   </button>
                 )}
+                {list.length === 0 && <div className="h-7 w-full" />}
               </div>
             </td>,
           )
-          di += colSpan
         }
         return dayCells
       })()}
@@ -1505,14 +1604,6 @@ function CellEditor({
   const [noteDraft, setNoteDraft] = useState('')
   const [pointsDraft, setPointsDraft] = useState('1')
   const [conductKind, setConductKind] = useState<ConductKind>('penalty')
-  /** Чернетка призначення: змінні лише для цього запису, не шаблону наряду. */
-  const [draft, setDraft] = useState<{
-    dutyId: string
-    variantId: string | null
-    spanDays: string
-    points: string
-    note: string
-  } | null>(null)
 
   const isDuties = normalizeJournalId(journalId) === 'duties'
   const isMyropil = normalizeJournalId(journalId) === 'myropil'
@@ -1527,33 +1618,20 @@ function CellEditor({
 
   if (!person) return null
 
-  const beginDraft = (duty: DutyType, variantId: string | null = null) => {
+  /** Одразу в журнал — без чернетки й кнопки «Поставити». Дні/бали правляться в списку вище. */
+  const placeDuty = (duty: DutyType, variantId: string | null = null) => {
     const base = dutyBasePoints(duty, variantId)
-    setDraft({
-      dutyId: duty.id,
-      variantId,
-      spanDays: String(Math.max(1, Math.floor(Number(duty.durationDays) || 1))),
-      points: String(dutyPointsForDate(base, date, weekendMultiplier)),
-      note: '',
-    })
-  }
-
-  const commitDraft = () => {
-    if (!draft) return
-    const duty = dutyById.get(draft.dutyId)
-    if (!duty) return
     addAssignment({
       journalId: isMyropil ? 'myropil' : 'duties',
       date,
       dutyTypeId: duty.id,
       personId,
-      variantId: draft.variantId,
-      points: Number(draft.points) || 0,
-      note: draft.note.trim(),
+      variantId,
+      points: duty.isMainDuty ? 0 : dutyPointsForDate(base, date, weekendMultiplier),
+      note: '',
       source: 'manual',
-      spanDays: Math.max(1, Math.floor(Number(draft.spanDays) || 1)),
+      spanDays: Math.max(1, Math.floor(Number(duty.durationDays) || 1)),
     })
-    setDraft(null)
   }
 
   const addNote = () => {
@@ -1589,9 +1667,6 @@ function CellEditor({
     })
     setNoteDraft('')
   }
-
-  const draftDuty = draft ? dutyById.get(draft.dutyId) : undefined
-  const draftLeaves = draftDuty ? leafVariants(draftDuty.variants) : []
 
   return (
     <Modal
@@ -1629,7 +1704,7 @@ function CellEditor({
               onClose()
             }}
           >
-            Готово
+            Закрити
           </button>
         </>
       }
@@ -1800,118 +1875,47 @@ function CellEditor({
         {isDutyJournal ? (
           <div className="flex flex-col gap-2">
             <span className="label">Додати наряд</span>
-            {draft && draftDuty ? (
-              <div className="flex flex-col gap-2 rounded-lg border border-brand-600/40 bg-brand-600/5 p-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <DutyBadge duty={draftDuty} short />
-                  {draftLeaves.length > 0 && (
-                    <select
-                      className="input w-32 py-1 text-xs"
-                      value={draft.variantId ?? ''}
-                      onChange={(e) => {
-                        const variantId = e.target.value || null
-                        const base = dutyBasePoints(draftDuty, variantId)
-                        setDraft((d) =>
-                          d
-                            ? {
-                                ...d,
-                                variantId,
-                                points: String(dutyPointsForDate(base, date, weekendMultiplier)),
-                              }
-                            : d,
-                        )
-                      }}
-                    >
-                      {draftLeaves.map((lv) => (
-                        <option key={lv.id} value={lv.id}>
-                          {lv.short || lv.name}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  <span className="text-[10px] text-fg-faint">лише цей запис</span>
-                </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  <Field label="Днів">
-                    <input
-                      type="number"
-                      min={1}
-                      className="input"
-                      value={draft.spanDays}
-                      onChange={(e) => setDraft((d) => (d ? { ...d, spanDays: e.target.value } : d))}
-                    />
-                  </Field>
-                  <Field label="Бали">
-                    <input
-                      type="number"
-                      step="0.5"
-                      className="input"
-                      value={draftDuty.isMainDuty ? '0' : draft.points}
-                      disabled={Boolean(draftDuty.isMainDuty)}
-                      onChange={(e) => setDraft((d) => (d ? { ...d, points: e.target.value } : d))}
-                    />
-                  </Field>
-                  <Field label="Примітка" className="col-span-2 sm:col-span-1">
-                    <input
-                      className="input"
-                      value={draft.note}
-                      placeholder="опційно"
-                      onChange={(e) => setDraft((d) => (d ? { ...d, note: e.target.value } : d))}
-                    />
-                  </Field>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button type="button" className="btn-primary btn-sm" onClick={commitDraft}>
-                    Поставити
-                  </button>
-                  <button type="button" className="btn-ghost btn-sm" onClick={() => setDraft(null)}>
-                    Скасувати
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <p className="text-[10px] text-fg-faint">
-                  Оберіть наряд — далі можна змінити дні / бали / підпункт тільки для цього призначення.
-                </p>
-                {duties.map((d) => {
-                  const variants = leafVariants(d.variants)
-                  if (variants.length === 0) {
-                    return (
-                      <button
-                        key={d.id}
-                        type="button"
-                        className="btn-secondary btn-sm w-fit"
-                        onClick={() => beginDraft(d)}
-                        title={`${d.name} · шаблон ${d.durationDays ?? 1} дн.`}
-                      >
-                        <span className="h-2.5 w-2.5" style={{ backgroundColor: d.color, borderRadius: 0 }} />
-                        {d.short || d.name}
-                        <span className="text-fg-faint">
-                          {dutyPointsForDate(d.points, date, weekendMultiplier)} б. · {d.durationDays ?? 1} дн.
-                        </span>
-                      </button>
-                    )
-                  }
+            <p className="text-[10px] text-fg-faint">
+              Клік — одразу в журнал. Дні / бали / підпункт міняй у списку вище, потім закрий.
+            </p>
+            <div className="flex flex-col gap-2">
+              {duties.map((d) => {
+                const variants = leafVariants(d.variants)
+                if (variants.length === 0) {
                   return (
-                    <div key={d.id} className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-xs font-medium text-fg-muted">{d.short || d.name}:</span>
-                      {variants.map((v) => (
-                        <button
-                          key={v.id}
-                          type="button"
-                          className="btn-secondary btn-sm"
-                          onClick={() => beginDraft(d, v.id)}
-                          title={`${d.name} › ${v.name}`}
-                        >
-                          {v.short || v.name}
-                        </button>
-                      ))}
-                    </div>
+                    <button
+                      key={d.id}
+                      type="button"
+                      className="btn-secondary btn-sm w-fit"
+                      onClick={() => placeDuty(d)}
+                      title={`${d.name} · ${d.durationDays ?? 1} дн.`}
+                    >
+                      <span className="h-2.5 w-2.5" style={{ backgroundColor: d.color, borderRadius: 0 }} />
+                      {d.short || d.name}
+                      <span className="text-fg-faint">
+                        {dutyPointsForDate(d.points, date, weekendMultiplier)} б. · {d.durationDays ?? 1} дн.
+                      </span>
+                    </button>
                   )
-                })}
-              </div>
-            )}
+                }
+                return (
+                  <div key={d.id} className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-medium text-fg-muted">{d.short || d.name}:</span>
+                    {variants.map((v) => (
+                      <button
+                        key={v.id}
+                        type="button"
+                        className="btn-secondary btn-sm"
+                        onClick={() => placeDuty(d, v.id)}
+                        title={`${d.name} › ${v.name}`}
+                      >
+                        {v.short || v.name}
+                      </button>
+                    ))}
+                  </div>
+                )
+              })}
+            </div>
           </div>
         ) : isConduct ? (
           <div className="flex flex-col gap-3">
